@@ -803,6 +803,14 @@ class MediaPlayerTemplate(TemplateEntity, MediaPlayerEntity):
                 self.async_write_ha_state()
             await self.async_run_script(script, context=self._context)
 
+    async def async_set_repeat(self, repeat):
+        """Send repeat set command."""
+        if script := self._action_scripts.get(CONF_REPEAT_SET_ACTION):
+            await self.async_run_script(
+                script,
+                run_variables={"repeat": repeat},
+                context=self._context,
+            )
 
     async def async_set_shuffle(self, shuffle):
         """Send shuffle set command."""
@@ -810,14 +818,5 @@ class MediaPlayerTemplate(TemplateEntity, MediaPlayerEntity):
             await self.async_run_script(
                 script,
                 run_variables={"shuffle": shuffle},
-                context=self._context,
-            )
-
-    async def async_set_repeat(self, repeat):
-        """Send repeat set command."""
-        if script := self._action_scripts.get(CONF_SHUFFLE_SET_ACTION):
-            await self.async_run_script(
-                script,
-                run_variables={"repeat": repeat},
                 context=self._context,
             )
