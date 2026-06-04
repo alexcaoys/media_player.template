@@ -3,6 +3,7 @@ https://github.com/Sennevds/media_player.template
 """
 
 import logging
+from typing import Any
 
 import voluptuous as vol
 
@@ -17,9 +18,13 @@ from homeassistant.components.media_player import (
     MediaType,
 )
 from homeassistant.components.template import DOMAIN
-from homeassistant.components.template.helpers import async_setup_template_platform
-from homeassistant.components.template.schemas import (
-    TEMPLATE_ENTITY_AVAILABILITY_SCHEMA_LEGACY,
+from homeassistant.components.template.const import (
+    CONF_AVAILABILITY,
+    CONF_DEFAULT_ENTITY_ID,
+    CONF_PICTURE,
+)
+from homeassistant.components.template.helpers import (
+    async_create_template_tracking_entities,
 )
 from homeassistant.components.template.template_entity import TemplateEntity
 from homeassistant.const import (
@@ -27,13 +32,17 @@ from homeassistant.const import (
     ATTR_FRIENDLY_NAME,
     CONF_DEVICE_CLASS,
     CONF_ENTITY_PICTURE_TEMPLATE,
+    CONF_FRIENDLY_NAME,
+    CONF_ICON,
     CONF_ICON_TEMPLATE,
+    CONF_NAME,
     CONF_STATE,
     CONF_UNIQUE_ID,
     CONF_VALUE_TEMPLATE,
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import TemplateError
+from homeassistant.helpers import template
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
@@ -41,15 +50,13 @@ import homeassistant.util.dt as dt_util
 
 _LOGGER = logging.getLogger(__name__)
 
-LEGACY_FIELDS = {
-    CONF_VALUE_TEMPLATE: CONF_STATE,
-}
 
 CONF_APP_ID_TEMPLATE = "app_id_template"
 CONF_APP_NAME_TEMPLATE = "app_name_template"
 CONF_ALBUM_ART_TEMPLATE = "album_art_template"
 CONF_ALBUM_TEMPLATE = "album_template"
 CONF_ARTIST_TEMPLATE = "artist_template"
+CONF_AVAILABILITY_TEMPLATE = "availability_template"
 CONF_CURRENT_IS_MUTED_TEMPLATE = "current_is_muted_template"
 CONF_CURRENT_POSITION_TEMPLATE = "current_position_template"
 CONF_CURRENT_SOUND_MODE_TEMPLATE = "current_sound_mode_template"
@@ -64,7 +71,7 @@ CONF_MEDIA_IMAGE_URL_REMOTELY_ACCESSIBLE = "media_image_url_remotely_accessible"
 CONF_MEDIA_IMAGE_URL_TEMPLATE = "media_image_url_template"
 CONF_MEDIA_SEASON_TEMPLATE = "media_season_template"
 CONF_MEDIA_SERIES_TITLE_TEMPLATE = "media_series_title_template"
-CONF_MEDIAPLAYER = "media_players"
+CONF_MEDIAPLAYERS = "media_players"
 CONF_MUTE_ACTION = "mute"
 CONF_NEXT_ACTION = "next"
 CONF_OFF_ACTION = "turn_off"
@@ -81,6 +88,19 @@ CONF_TITLE_TEMPLATE = "title_template"
 CONF_VOLUME_DOWN_ACTION = "volume_down"
 CONF_VOLUME_UP_ACTION = "volume_up"
 
+LEGACY_FIELDS = {
+    CONF_AVAILABILITY_TEMPLATE: CONF_AVAILABILITY,
+    CONF_ENTITY_PICTURE_TEMPLATE: CONF_PICTURE,
+    CONF_FRIENDLY_NAME: CONF_NAME,
+    CONF_ICON_TEMPLATE: CONF_ICON,
+    CONF_VALUE_TEMPLATE: CONF_STATE,
+}
+
+TEMPLATE_ENTITY_AVAILABILITY_SCHEMA_LEGACY = vol.Schema(
+    {
+        vol.Optional(CONF_AVAILABILITY_TEMPLATE): cv.template,
+    }
+)
 
 MEDIA_PLAYER_SCHEMA = vol.Schema(
     {
@@ -129,8 +149,53 @@ MEDIA_PLAYER_SCHEMA = vol.Schema(
 ).extend(TEMPLATE_ENTITY_AVAILABILITY_SCHEMA_LEGACY.schema)
 
 PLATFORM_SCHEMA = MEDIA_PLAYER_PLATFORM_SCHEMA.extend(
-    {vol.Required(CONF_MEDIAPLAYER): cv.schema_with_slug_keys(MEDIA_PLAYER_SCHEMA)}
+    {vol.Required(CONF_MEDIAPLAYERS): cv.schema_with_slug_keys(MEDIA_PLAYER_SCHEMA)}
 )
+
+
+def rewrite_legacy_to_modern_config(
+    hass: HomeAssistant,
+    entity_cfg: dict[str, Any],
+) -> dict[str, Any]:
+    """Rewrite legacy config."""
+    entity_cfg = {**entity_cfg}
+
+    # Remove deprecated entity_id field from legacy syntax
+    entity_cfg.pop(ATTR_ENTITY_ID, None)
+
+    for from_key, to_key in LEGACY_FIELDS.items():
+        if from_key not in entity_cfg or to_key in entity_cfg:
+            continue
+
+        val = entity_cfg.pop(from_key)
+        if isinstance(val, str):
+            val = template.Template(val, hass)
+        entity_cfg[to_key] = val
+
+    if CONF_NAME in entity_cfg and isinstance(entity_cfg[CONF_NAME], str):
+        entity_cfg[CONF_NAME] = template.Template(entity_cfg[CONF_NAME], hass)
+
+    return entity_cfg
+
+
+def rewrite_legacy_to_modern_configs(
+    hass: HomeAssistant,
+    domain: str,
+    entity_cfg: dict[str, dict],
+) -> list[dict]:
+    """Rewrite legacy configuration definitions to modern ones."""
+    entities = []
+    for object_id, entity_conf in entity_cfg.items():
+        entity_conf = {**entity_conf, CONF_DEFAULT_ENTITY_ID: f"{domain}.{object_id}"}
+
+        entity_conf = rewrite_legacy_to_modern_config(hass, entity_conf)
+
+        if CONF_NAME not in entity_conf:
+            entity_conf[CONF_NAME] = template.Template(object_id, hass)
+
+        entities.append(entity_conf)
+
+    return entities
 
 
 async def async_setup_platform(
@@ -140,17 +205,13 @@ async def async_setup_platform(
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
     """Set up the template media player."""
-    await async_setup_template_platform(
-        hass,
-        MEDIA_PLAYER_DOMAIN,
-        config,
-        MediaPlayerTemplate,
-        None,
-        async_add_entities,
-        discovery_info,
-        LEGACY_FIELDS,
-        CONF_MEDIAPLAYER,
-    )
+    if discovery_info is None:
+        configs = rewrite_legacy_to_modern_configs(
+            hass, MEDIA_PLAYER_DOMAIN, config[CONF_MEDIAPLAYERS]
+        )
+        async_create_template_tracking_entities(
+            MediaPlayerTemplate, async_add_entities, hass, configs, None
+        )
 
 
 class MediaPlayerTemplate(TemplateEntity, MediaPlayerEntity):
@@ -462,7 +523,6 @@ class MediaPlayerTemplate(TemplateEntity, MediaPlayerEntity):
             return
 
         self._attr_app_id = vol.Coerce(str)(result)
-
 
     @callback
     def _update_app_name(self, result):
